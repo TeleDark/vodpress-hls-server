@@ -30,7 +30,7 @@ npm install
 ```
 
 ### Configure Environment Variables
-Create a `.env` file in the root directory with the following:
+Copy `.env.example` to `.env` and fill in your actual values.
 ```ini
 PORT=3000
 AWS_ACCESS_KEY_ID=your-access-key
