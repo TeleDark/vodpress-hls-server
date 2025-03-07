@@ -1,0 +1,14 @@
+/node_modules/
+temp/
+*.log
+*.log.*
+.env
+.env.backup
+Thumbs.db
+npm-debug.log
+yarn-error.log
+*.bak
+*.swp
+*.swo
+package-lock.json
+dist/
