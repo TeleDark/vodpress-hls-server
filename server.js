@@ -280,8 +280,6 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
     const tempFilePath = path.join(TEMP_DIR, `video_${video_id}.mp4`);
     const outputDir = path.join(TEMP_DIR, `hls_${video_id}`);
 
-
-
     const updateStatus = async (status, error = null, conversion_url = null) => {
         try {
             const payload = { video_id, status, ...(error && { error: error.message }), ...(conversion_url && { conversion_url }) };
@@ -298,7 +296,6 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
             new Promise((_, reject) => setTimeout(() => reject(new Error('Download timeout after 30 minutes')), 1800000))
         ]);
 
-        
         await updateStatus('converting');
         await Promise.race([
             convertToHLS(tempFilePath, outputDir),
@@ -329,14 +326,24 @@ async function sendCallback(callbackUrl, data, maxRetries = 3) {
     while (attempt < maxRetries) {
         try {
             const payload = { ...data, timestamp: Date.now(), source: 'vodpress-conversion-server' };
+            
+            // Set request headers
+            const headers = {
+                'X-API-Key-Hash': apiKeyManager.generateKeyHash(process.env.API_KEYS.split(',')[0]),
+                'Content-Type': 'application/json'
+            };
+
+            // Add Authorization header for HTTP Basic Auth
+            if (process.env.BASIC_AUTH_USERNAME && process.env.BASIC_AUTH_PASSWORD) {
+                const auth = Buffer.from(`${process.env.BASIC_AUTH_USERNAME}:${process.env.BASIC_AUTH_PASSWORD}`).toString('base64');
+                headers['Authorization'] = `Basic ${auth}`;
+            }
+            
             const response = await axios({
                 method: 'POST',
                 url: callbackUrl,
                 data: payload,
-                headers: {
-                    'X-API-Key-Hash': apiKeyManager.generateKeyHash(process.env.API_KEYS.split(',')[0]),
-                    'Content-Type': 'application/json'
-                },
+                headers,
                 timeout: 30000,
                 validateStatus: false
             });
