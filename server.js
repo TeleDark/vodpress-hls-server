@@ -275,6 +275,46 @@ app.post('/api/convert', authenticateAPIKey, async (req, res) => {
     }
 });
 
+// Add new endpoint for video deletion
+app.post('/api/delete', authenticateAPIKey, async (req, res) => {
+    try {
+        const { video_id } = req.body;
+
+        if (!video_id) {
+            return res.status(400).json({ success: false, error: 'Video ID is required' });
+        }
+
+        const s3FolderPath = `videos/${video_id}`;
+
+        // List all objects in the video folder
+        const listParams = {
+            Bucket: process.env.S3_BUCKET,
+            Prefix: s3FolderPath
+        };
+
+        const objects = await s3.listObjectsV2(listParams).promise();
+
+        if (objects.Contents.length === 0) {
+            return res.status(404).json({ success: false, error: 'Video not found in storage' });
+        }
+
+        // Delete all objects in the folder
+        const deleteParams = {
+            Bucket: process.env.S3_BUCKET,
+            Delete: {
+                Objects: objects.Contents.map(obj => ({ Key: obj.Key }))
+            }
+        };
+
+        await s3.deleteObjects(deleteParams).promise();
+
+        res.json({ success: true, message: 'Video deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting video:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // Process Video in Background
 async function processVideoInBackground(video_url, video_id, callback_url, videoData) {
     const tempFilePath = path.join(TEMP_DIR, `video_${video_id}.mp4`);
