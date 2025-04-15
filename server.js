@@ -87,6 +87,23 @@ async function downloadVideo(url, outputPath) {
     }
 }
 
+// Get video duration in seconds
+async function getVideoDuration(inputPath) {
+    return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(inputPath, (err, metadata) => {
+            if (err) {
+                console.error('Error getting video duration:', err);
+                return reject(err);
+            }
+
+            // Duration is in seconds
+            const duration = Math.round(metadata.format.duration);
+            console.log(`Video duration: ${duration} seconds`);
+            resolve(duration);
+        });
+    });
+}
+
 // Convert to HLS Function
 function convertToHLS(inputPath, outputDir) {
     if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
@@ -444,9 +461,15 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
     const tempFilePath = path.join(TEMP_DIR, `video_${video_id}.mp4`);
     const outputDir = path.join(TEMP_DIR, `hls_${video_id}`);
 
-    const updateStatus = async (status, error = null, conversion_url = null) => {
+    const updateStatus = async (status, error = null, conversion_url = null, duration = null) => {
         try {
-            const payload = { video_id, status, ...(error && { error: error.message }), ...(conversion_url && { conversion_url }) };
+            const payload = {
+                video_id,
+                status,
+                ...(error && { error: error.message }),
+                ...(conversion_url && { conversion_url }),
+                ...(duration !== null && { duration })
+            };
             await sendCallback(callback_url, payload);
         } catch (callbackError) {
             console.error(`Failed to send callback for status ${status}:`, callbackError);
@@ -460,19 +483,31 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
             new Promise((_, reject) => setTimeout(() => reject(new Error('Download timeout after 30 minutes')), 1800000))
         ]);
 
-        await updateStatus('converting');
+        // Get video duration after download
+        let videoDuration = 0;
+        try {
+            videoDuration = await getVideoDuration(tempFilePath);
+            console.log(`Extracted video duration: ${videoDuration} seconds`);
+            // Send the duration as early as possible
+            await updateStatus('converting', null, null, videoDuration);
+        } catch (durationError) {
+            console.error('Error getting video duration:', durationError);
+            // Continue with conversion even if duration extraction fails
+            await updateStatus('converting');
+        }
+
         await Promise.race([
             convertToHLS(tempFilePath, outputDir),
             new Promise((_, reject) => setTimeout(() => reject(new Error('Conversion timeout after 90 minutes')), 5400000))
         ]);
 
-        await updateStatus('uploading');
+        await updateStatus('uploading', null, null, videoDuration);
         const s3Url = await Promise.race([
             uploadToS3(outputDir, video_id, videoData),
             new Promise((_, reject) => setTimeout(() => reject(new Error('Upload timeout after 60 minutes')), 3600000))
         ]);
 
-        await updateStatus('completed', null, s3Url);
+        await updateStatus('completed', null, s3Url, videoDuration);
         await cleanup(tempFilePath, outputDir);
         return s3Url;
     } catch (error) {
