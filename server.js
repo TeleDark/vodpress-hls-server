@@ -104,11 +104,46 @@ async function getVideoDuration(inputPath) {
     });
 }
 
+// Get video resolution function
+async function getVideoResolution(inputPath) {
+    return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(inputPath, (err, metadata) => {
+            if (err) {
+                console.error('Error getting video resolution:', err);
+                return reject(err);
+            }
+
+            // Get video stream info
+            const videoStream = metadata.streams.find(s => s.codec_type === 'video');
+            if (!videoStream) {
+                return reject(new Error('No video stream found'));
+            }
+
+            const width = videoStream.width;
+            const height = videoStream.height;
+            const isVertical = height > width;
+            resolve({ width, height, isVertical });
+        });
+    });
+}
+
 // Convert to HLS Function
-function convertToHLS(inputPath, outputDir) {
+async function convertToHLS(inputPath, outputDir) {
     if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
-    const qualities = ['1080p', '720p', '480p'];
+    // Get video resolution first
+    let is4K = false;
+    let isVertical = false;
+    try {
+        const resolution = await getVideoResolution(inputPath);
+        // Check if video is 4K (width ≥ 3840 or height ≥ 2160)
+        is4K = resolution.width >= 3840 || resolution.height >= 2160;
+        isVertical = resolution.isVertical;
+    } catch (error) {
+        console.error('Error determining video resolution:', error);
+    }
+
+    const qualities = is4K ? ['4K', '1080p', '720p', '480p'] : ['1080p', '720p', '480p'];
     qualities.forEach(quality => {
         const qualityDir = path.join(outputDir, quality);
         if (!fs.existsSync(qualityDir)) fs.mkdirSync(qualityDir, { recursive: true });
@@ -118,7 +153,38 @@ function convertToHLS(inputPath, outputDir) {
         let conversionStarted = false;
         let conversionTimeout;
 
-        const conversion = ffmpeg(inputPath)
+        // For vertical videos
+        let scaleFilters;
+        if (isVertical) {
+            if (is4K) {
+                scaleFilters = '[0:v]split=4[v1][v2][v3][v4];' +
+                    '[v1]scale=w=2160:h=3840:force_original_aspect_ratio=decrease,pad=2160:3840:(ow-iw)/2:(oh-ih)/2[v1out];' +
+                    '[v2]scale=w=1080:h=1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[v2out];' +
+                    '[v3]scale=w=720:h=1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[v3out];' +
+                    '[v4]scale=w=480:h=854:force_original_aspect_ratio=decrease,pad=480:854:(ow-iw)/2:(oh-ih)/2[v4out]';
+            } else {
+                scaleFilters = '[0:v]split=3[v1][v2][v3];' +
+                    '[v1]scale=w=1080:h=1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[v1out];' +
+                    '[v2]scale=w=720:h=1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2[v2out];' +
+                    '[v3]scale=w=480:h=854:force_original_aspect_ratio=decrease,pad=480:854:(ow-iw)/2:(oh-ih)/2[v3out]';
+            }
+        } else {
+            // Horizontal video scaling 
+            if (is4K) {
+                scaleFilters = '[0:v]split=4[v1][v2][v3][v4];' +
+                    '[v1]scale=w=3840:h=2160:force_original_aspect_ratio=decrease,pad=3840:2160:(ow-iw)/2:(oh-ih)/2[v1out];' +
+                    '[v2]scale=w=1920:h=1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[v2out];' +
+                    '[v3]scale=w=1280:h=720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[v3out];' +
+                    '[v4]scale=w=854:h=480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2[v4out]';
+            } else {
+                scaleFilters = '[0:v]split=3[v1][v2][v3];' +
+                    '[v1]scale=w=1920:h=1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[v1out];' +
+                    '[v2]scale=w=1280:h=720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[v2out];' +
+                    '[v3]scale=w=854:h=480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2[v3out]';
+            }
+        }
+
+        let conversion = ffmpeg(inputPath)
             .outputOptions([
                 '-preset faster',
                 '-threads 0',
@@ -130,9 +196,34 @@ function convertToHLS(inputPath, outputDir) {
                 '-sc_threshold 0',
                 '-g 48',
                 '-keyint_min 48'
-            ])
-            .outputOptions([
-                '-filter_complex', '[0:v]split=3[v1][v2][v3];[v1]scale=w=1920:h=1080:flags=lanczos[v1out];[v2]scale=w=1280:h=720:flags=lanczos[v2out];[v3]scale=w=854:h=480:flags=lanczos[v3out]',
+            ]);
+
+        // Configure filter_complex based on whether video is 4K or not
+        if (is4K) {
+            conversion = conversion.outputOptions([
+                '-filter_complex', scaleFilters,
+                // 4K stream
+                '-map', '[v1out]', '-c:v:0', 'libx264', '-b:v:0', '14000k', '-maxrate:v:0', '14980k', '-bufsize:v:0', '21000k', '-crf:v:0', '22', '-profile:v', 'high', '-level:v', '5.1',
+                // 1080p stream
+                '-map', '[v2out]', '-c:v:1', 'libx264', '-b:v:1', '5000k', '-maxrate:v:1', '5350k', '-bufsize:v:1', '7500k', '-crf:v:1', '23', '-profile:v', 'high', '-level:v', '4.1',
+                // 720p stream
+                '-map', '[v3out]', '-c:v:2', 'libx264', '-b:v:2', '2800k', '-maxrate:v:2', '2996k', '-bufsize:v:2', '4200k', '-crf:v:2', '23',
+                // 480p stream
+                '-map', '[v4out]', '-c:v:3', 'libx264', '-b:v:3', '1400k', '-maxrate:v:3', '1498k', '-bufsize:v:3', '2100k', '-crf:v:3', '23',
+                // Audio streams
+                '-map', 'a:0', '-c:a:0', 'aac', '-b:a:0', '192k', '-ac', '2', '-af', 'aresample=async=1000',
+                '-map', 'a:0', '-c:a:1', 'aac', '-b:a:1', '192k', '-ac', '2',
+                '-map', 'a:0', '-c:a:2', 'aac', '-b:a:2', '128k', '-ac', '2',
+                '-map', 'a:0', '-c:a:3', 'aac', '-b:a:3', '96k', '-ac', '2',
+                // HLS settings
+                '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'vod', '-hls_flags', 'independent_segments+program_date_time', '-hls_segment_type', 'mpegts',
+                '-hls_segment_filename', path.join(outputDir, 'stream_%v/data%03d.ts'), '-master_pl_name', 'master.m3u8',
+                '-var_stream_map', 'v:0,a:0 v:1,a:1 v:2,a:2 v:3,a:3'
+            ]);
+        } else {
+            // Original settings for non-4K videos
+            conversion = conversion.outputOptions([
+                '-filter_complex', scaleFilters,
                 '-map', '[v1out]', '-c:v:0', 'libx264', '-b:v:0', '5000k', '-maxrate:v:0', '5350k', '-bufsize:v:0', '7500k', '-crf:v:0', '23', '-profile:v', 'high', '-level:v', '4.1',
                 '-map', '[v2out]', '-c:v:1', 'libx264', '-b:v:1', '2800k', '-maxrate:v:1', '2996k', '-bufsize:v:1', '4200k', '-crf:v:1', '23',
                 '-map', '[v3out]', '-c:v:2', 'libx264', '-b:v:2', '1400k', '-maxrate:v:2', '1498k', '-bufsize:v:2', '2100k', '-crf:v:2', '23',
@@ -141,8 +232,11 @@ function convertToHLS(inputPath, outputDir) {
                 '-map', 'a:0', '-c:a:2', 'aac', '-b:a:2', '96k', '-ac', '2',
                 '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'vod', '-hls_flags', 'independent_segments+program_date_time', '-hls_segment_type', 'mpegts',
                 '-hls_segment_filename', path.join(outputDir, 'stream_%v/data%03d.ts'), '-master_pl_name', 'master.m3u8', '-var_stream_map', 'v:0,a:0 v:1,a:1 v:2,a:2'
-            ])
-            .output(path.join(outputDir, 'stream_%v/playlist.m3u8'));
+            ]);
+        }
+
+        // Output to playlist
+        conversion.output(path.join(outputDir, 'stream_%v/playlist.m3u8'));
 
         conversion.on('start', () => { conversionStarted = true; });
         conversion.on('progress', (progress) => { console.log(`Processing: ${progress.percent}% done at ${progress.currentFps} fps`); });
@@ -498,7 +592,7 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
 
         await Promise.race([
             convertToHLS(tempFilePath, outputDir),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Conversion timeout after 90 minutes')), 5400000))
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Conversion timeout after 240 minutes')), 14400000))
         ]);
 
         await updateStatus('uploading', null, null, videoDuration);
