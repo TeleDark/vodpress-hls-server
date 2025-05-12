@@ -555,14 +555,15 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
     const tempFilePath = path.join(TEMP_DIR, `video_${video_id}.mp4`);
     const outputDir = path.join(TEMP_DIR, `hls_${video_id}`);
 
-    const updateStatus = async (status, error = null, conversion_url = null, duration = null) => {
+    const updateStatus = async (status, error = null, conversion_url = null, duration = null, original_url = null) => {
         try {
             const payload = {
                 video_id,
                 status,
                 ...(error && { error: error.message }),
                 ...(conversion_url && { conversion_url }),
-                ...(duration !== null && { duration })
+                ...(duration !== null && { duration }),
+                ...(original_url && { original_url })
             };
             await sendCallback(callback_url, payload);
         } catch (callbackError) {
@@ -577,13 +578,85 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
             new Promise((_, reject) => setTimeout(() => reject(new Error('Download timeout after 30 minutes')), 1800000))
         ]);
 
+        // Upload original video to S3 before conversion
+        await updateStatus('uploading-original', null, null);
+        let originalUrl = null;
+        try {
+            const s3FolderPath = `videos/${video_id}/original`;
+
+            // Extract original filename from url
+            let originalFilename = 'original.mp4';
+            try {
+                // Try to get the original filename from the URL
+                const parsedUrl = new URL(video_url);
+                const urlPath = decodeURIComponent(parsedUrl.pathname);
+                const urlFilename = path.basename(urlPath);
+
+                if (urlFilename && urlFilename.length > 0 && urlFilename !== '/' && urlFilename.includes('.')) {
+                    const fileExt = path.extname(urlFilename);
+
+                    const filenameWithoutExt = path.basename(urlFilename, fileExt);
+                    
+                    const cleanedFilename = filenameWithoutExt.replace(/\s+/g, '-');
+                    originalFilename = `${cleanedFilename}_${video_id}${fileExt}`;
+                } else {
+                    
+                    originalFilename = `video_${video_id}.mp4`;
+                }
+            } catch (error) {
+                console.log('Could not extract filename from URL, using default name');
+                originalFilename = `video_${video_id}.mp4`;
+            }
+
+            const s3Path = `${s3FolderPath}/${originalFilename}`;
+            console.log(`Uploading original video to ${s3Path}`);
+
+            const fileExt = path.extname(originalFilename).toLowerCase();
+            let contentType = 'video/mp4';
+
+            // Map common video extensions to MIME types
+            const videoMimeTypes = {
+                '.mp4': 'video/mp4',
+                '.mkv': 'video/x-matroska',
+                '.avi': 'video/x-msvideo',
+                '.mov': 'video/quicktime',
+                '.wmv': 'video/x-ms-wmv',
+                '.flv': 'video/x-flv',
+                '.webm': 'video/webm',
+                '.mpeg': 'video/mpeg',
+                '.mpg': 'video/mpeg',
+                '.m4v': 'video/x-m4v',
+                '.3gp': 'video/3gpp'
+            };
+
+            if (videoMimeTypes[fileExt]) {
+                contentType = videoMimeTypes[fileExt];
+            }
+
+            const fileStream = fs.createReadStream(tempFilePath);
+            const params = {
+                Bucket: process.env.S3_BUCKET,
+                Key: s3Path,
+                Body: fileStream,
+                ContentType: contentType
+            };
+            await s3.upload(params).promise();
+
+            const publicUrlBase = videoData?.public_url_base || process.env.S3_ENDPOINT;
+            originalUrl = `${publicUrlBase}/${s3Path}`;
+            console.log(`Successfully uploaded original video to ${s3Path}`);
+            console.log('Original video URL:', originalUrl);
+        } catch (uploadError) {
+            console.error('Error uploading original video:', uploadError);
+        }
+        
         // Get video duration after download
         let videoDuration = 0;
         try {
             videoDuration = await getVideoDuration(tempFilePath);
             console.log(`Extracted video duration: ${videoDuration} seconds`);
             // Send the duration as early as possible
-            await updateStatus('converting', null, null, videoDuration);
+            await updateStatus('converting', null, null, videoDuration, originalUrl);
         } catch (durationError) {
             console.error('Error getting video duration:', durationError);
             // Continue with conversion even if duration extraction fails
@@ -595,13 +668,13 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
             new Promise((_, reject) => setTimeout(() => reject(new Error('Conversion timeout after 240 minutes')), 14400000))
         ]);
 
-        await updateStatus('uploading', null, null, videoDuration);
+        await updateStatus('uploading', null, null, videoDuration, originalUrl);
         const s3Url = await Promise.race([
             uploadToS3(outputDir, video_id, videoData),
             new Promise((_, reject) => setTimeout(() => reject(new Error('Upload timeout after 60 minutes')), 3600000))
         ]);
 
-        await updateStatus('completed', null, s3Url, videoDuration);
+        await updateStatus('completed', null, s3Url, videoDuration, originalUrl);
         await cleanup(tempFilePath, outputDir);
         return s3Url;
     } catch (error) {
@@ -619,7 +692,7 @@ async function sendCallback(callbackUrl, data, maxRetries = 3) {
     while (attempt < maxRetries) {
         try {
             const payload = { ...data, timestamp: Date.now(), source: 'vodpress-conversion-server' };
-            
+
             // Set request headers
             const headers = {
                 'X-API-Key-Hash': apiKeyManager.generateKeyHash(process.env.API_KEYS.split(',')[0]),
@@ -631,7 +704,7 @@ async function sendCallback(callbackUrl, data, maxRetries = 3) {
                 const auth = Buffer.from(`${process.env.BASIC_AUTH_USERNAME}:${process.env.BASIC_AUTH_PASSWORD}`).toString('base64');
                 headers['Authorization'] = `Basic ${auth}`;
             }
-            
+
             const response = await axios({
                 method: 'POST',
                 url: callbackUrl,
