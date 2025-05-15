@@ -24,19 +24,19 @@ class ProcessingManager {
     }
 
     // Add video to queue
-    addToQueue(videoId, videoUrl, callbackUrl, videoData = {}) {
+    addToQueue(video_uuid, videoUrl, callbackUrl, videoData = {}) {
         // Check if this video is already in the queue
-        const existingIndex = this.videoQueue.findIndex(item => item.videoId === videoId);
+        const existingIndex = this.videoQueue.findIndex(item => item.video_uuid === video_uuid);
 
         if (existingIndex >= 0) {
             // Update existing entry instead of adding a duplicate
-            this.videoQueue[existingIndex] = { videoId, videoUrl, callbackUrl, videoData };
-            console.log(`Updated video ${videoId} in queue`);
+            this.videoQueue[existingIndex] = { video_uuid, videoUrl, callbackUrl, videoData };
+            console.log(`Updated video ${video_uuid} in queue`);
             return { success: true, position: existingIndex + 1, message: 'Video updated in queue' };
         } else {
             // Add to queue
-            this.videoQueue.push({ videoId, videoUrl, callbackUrl, videoData });
-            console.log(`Added video ${videoId} to queue at position ${this.videoQueue.length}`);
+            this.videoQueue.push({ video_uuid, videoUrl, callbackUrl, videoData });
+            console.log(`Added video ${video_uuid} to queue at position ${this.videoQueue.length}`);
             return { success: true, position: this.videoQueue.length, message: 'Video added to queue' };
         }
     }
@@ -46,7 +46,7 @@ class ProcessingManager {
         return {
             currentlyProcessing: this.currentlyProcessing,
             queueLength: this.videoQueue.length,
-            queueItems: this.videoQueue.map(item => item.videoId)
+            queueItems: this.videoQueue.map(item => item.video_uuid)
         };
     }
 
@@ -65,24 +65,24 @@ class ProcessingManager {
         }
 
         const nextVideo = this.videoQueue.shift();
-        this.startProcessing(nextVideo.videoId, nextVideo.callbackUrl);
+        this.startProcessing(nextVideo.video_uuid, nextVideo.callbackUrl);
 
         return {
-            videoId: nextVideo.videoId,
+            video_uuid: nextVideo.video_uuid,
             videoUrl: nextVideo.videoUrl,
             callbackUrl: nextVideo.callbackUrl,
             videoData: nextVideo.videoData
         };
     }
 
-    startProcessing(videoId, callbackUrl) {
+    startProcessing(video_uuid, callbackUrl) {
         if (this.isProcessing()) {
             return false;
         }
-        this.currentlyProcessing = videoId;
+        this.currentlyProcessing = video_uuid;
         this.callbackUrl = callbackUrl;
         this.processingStartTime = Date.now();
-        console.log(`Started processing video ${videoId} at ${new Date().toISOString()}`);
+        console.log(`Started processing video ${video_uuid} at ${new Date().toISOString()}`);
         return true;
     }
 
@@ -90,8 +90,8 @@ class ProcessingManager {
         return this.currentlyProcessing;
     }
 
-    getCallbackUrl(videoId) {
-        return this.currentlyProcessing === videoId ? this.callbackUrl : null;
+    getCallbackUrl(video_uuid) {
+        return this.currentlyProcessing === video_uuid ? this.callbackUrl : null;
     }
 
     resetProcessing() {
@@ -100,23 +100,23 @@ class ProcessingManager {
         this.callbackUrl = null;
     }
 
-    completeProcessing(videoId) {
-        if (this.currentlyProcessing === videoId) {
+    completeProcessing(video_uuid) {
+        if (this.currentlyProcessing === video_uuid) {
             this.resetProcessing();
-            console.log(`Completed processing video ${videoId} at ${new Date().toISOString()}`);
+            console.log(`Completed processing video ${video_uuid} at ${new Date().toISOString()}`);
             return true;
         }
         return false;
     }
 
     // Remove a specific video from the queue
-    removeFromQueue(videoId) {
+    removeFromQueue(video_uuid) {
         const initialLength = this.videoQueue.length;
-        this.videoQueue = this.videoQueue.filter(item => item.videoId !== videoId);
+        this.videoQueue = this.videoQueue.filter(item => item.video_uuid !== video_uuid);
 
         const removed = initialLength > this.videoQueue.length;
         if (removed) {
-            console.log(`Removed video ${videoId} from queue`);
+            console.log(`Removed video ${video_uuid} from queue`);
         }
 
         return removed;

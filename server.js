@@ -269,9 +269,9 @@ async function convertToHLS(inputPath, outputDir) {
 }
 
 // Upload to S3 Function
-async function uploadToS3(directory, videoId, videoData) {
+async function uploadToS3(directory, videoUuid, videoData) {
     const s3BaseUrl = process.env.S3_ENDPOINT;
-    const s3FolderPath = `videos/${videoId}`;
+    const s3FolderPath = `videos/${videoUuid}`;
 
     try {
         async function getFiles(dir) {
@@ -346,53 +346,54 @@ app.use((req, res, next) => {
 app.post('/api/convert', authenticateAPIKey, async (req, res) => {
     try {
         console.log('Received request body:', req.body);
-        const { video_url, video_id, callback_url, site_url } = req.body;
+        const { video_url, video_uuid, callback_url, site_url } = req.body;
 
-        if (!video_url || !video_id || !callback_url) {
+        if (!video_url || !video_uuid || !callback_url) {
             return res.status(400).json({ success: false, error: 'Missing required parameters' });
         }
 
         // Check if this video is currently processing
-        if (processingManager.getProcessingVideo() === video_id) {
+        if (processingManager.getProcessingVideo() === video_uuid) {
             return res.status(200).json({
                 success: true,
                 message: 'Video is already being processed',
-                video_id,
+                video_uuid,
                 is_processing: true,
-                currently_processing: video_id,
+                currently_processing: video_uuid,
                 queue_position: 0
             });
         }
 
         // Add video to processing queue
         const videoData = { site_url };
-        const queueResult = processingManager.addToQueue(video_id, video_url, callback_url, videoData);
+        const queueResult = processingManager.addToQueue(video_uuid, video_url, callback_url, videoData);
+        
         let isProcessingThisVideo = false;
 
         // If the queue was empty and no video is processing, start processing this one immediately
         if (!processingManager.isProcessing()) {
             const nextVideo = processingManager.processNextInQueue();
-            if (nextVideo && nextVideo.videoId === video_id) {
+            if (nextVideo && nextVideo.video_uuid === video_uuid) {
                 isProcessingThisVideo = true;
 
                 // Send status update immediately to mark as downloading
                 sendCallback(callback_url, {
-                    video_id: video_id,
+                    video_uuid: video_uuid,
                     status: 'downloading',
                     message: 'Starting video processing'
                 }).catch(error => console.error('Failed to send initial status update:', error));
 
                 // Start processing in background
-                processVideoInBackground(nextVideo.videoUrl, nextVideo.videoId, nextVideo.callbackUrl, nextVideo.videoData)
+                processVideoInBackground(nextVideo.videoUrl, nextVideo.video_uuid, nextVideo.callbackUrl, nextVideo.videoData)
                     .then(() => {
-                        processingManager.completeProcessing(nextVideo.videoId);
+                        processingManager.completeProcessing(nextVideo.video_uuid);
                         // Process next video in queue if available
                         processNextVideoInQueue();
                     })
                     .catch(error => {
-                        console.error('Error processing video:', error);
-                        processingManager.completeProcessing(nextVideo.videoId);
-                        sendCallback(nextVideo.callbackUrl, { video_id: nextVideo.videoId, status: 'failed', error: error.message })
+                        console.error(`Error processing video ${nextVideo.video_uuid}:`, error);
+                        processingManager.completeProcessing(nextVideo.video_uuid);
+                        sendCallback(nextVideo.callbackUrl, { video_uuid: nextVideo.video_uuid, status: 'failed', error: error.message })
                             .catch(callbackError => console.error('Error sending failure callback:', callbackError));
                         // Process next video in queue if available
                         processNextVideoInQueue();
@@ -404,7 +405,7 @@ app.post('/api/convert', authenticateAPIKey, async (req, res) => {
             success: true,
             message: isProcessingThisVideo ?
                 'Video processing started' : 'Video added to queue',
-            video_id,
+            video_uuid,
             queue_position: queueResult.position,
             currently_processing: processingManager.getProcessingVideo(),
             is_processing: isProcessingThisVideo
@@ -435,14 +436,14 @@ app.get('/api/queue-status', authenticateAPIKey, (req, res) => {
 // Add endpoint to remove video from queue
 app.post('/api/remove-from-queue', authenticateAPIKey, (req, res) => {
     try {
-        const { video_id } = req.body;
+        const { video_uuid } = req.body;
 
-        if (!video_id) {
-            return res.status(400).json({ success: false, error: 'Video ID is required' });
+        if (!video_uuid) {
+            return res.status(400).json({ success: false, error: 'Video UUID is required' });
         }
 
         // If video is currently processing, we can't remove it
-        if (processingManager.getProcessingVideo() === video_id) {
+        if (processingManager.getProcessingVideo() === video_uuid) {
             return res.status(409).json({
                 success: false,
                 error: 'Video is currently being processed and cannot be removed from queue',
@@ -451,7 +452,7 @@ app.post('/api/remove-from-queue', authenticateAPIKey, (req, res) => {
         }
 
         // Remove video from queue
-        const removed = processingManager.removeFromQueue(video_id);
+        const removed = processingManager.removeFromQueue(video_uuid);
 
         res.json({
             success: true,
@@ -471,21 +472,21 @@ function processNextVideoInQueue() {
         if (nextVideo) {
             // Send status update immediately to mark as downloading
             sendCallback(nextVideo.callbackUrl, {
-                video_id: nextVideo.videoId,
+                video_uuid: nextVideo.video_uuid,
                 status: 'downloading',
                 message: 'Starting video processing'
             }).catch(error => console.error('Failed to send initial status update:', error));
 
-            processVideoInBackground(nextVideo.videoUrl, nextVideo.videoId, nextVideo.callbackUrl, nextVideo.videoData)
+            processVideoInBackground(nextVideo.videoUrl, nextVideo.video_uuid, nextVideo.callbackUrl, nextVideo.videoData)
                 .then(() => {
-                    processingManager.completeProcessing(nextVideo.videoId);
+                    processingManager.completeProcessing(nextVideo.video_uuid);
                     // Process next video in queue
                     processNextVideoInQueue();
                 })
                 .catch(error => {
-                    console.error('Error processing next video in queue:', error);
-                    processingManager.completeProcessing(nextVideo.videoId);
-                    sendCallback(nextVideo.callbackUrl, { video_id: nextVideo.videoId, status: 'failed', error: error.message })
+                    console.error(`Error processing next video in queue ${nextVideo.video_uuid}:`, error);
+                    processingManager.completeProcessing(nextVideo.video_uuid);
+                    sendCallback(nextVideo.callbackUrl, { video_uuid: nextVideo.video_uuid, status: 'failed', error: error.message })
                         .catch(callbackError => console.error('Error sending failure callback:', callbackError));
                     // Continue with next video in queue despite error
                     processNextVideoInQueue();
@@ -501,17 +502,17 @@ function processNextVideoInQueue() {
 // Add new endpoint for video deletion
 app.post('/api/delete', authenticateAPIKey, async (req, res) => {
     try {
-        const { video_id } = req.body;
+        const { video_uuid } = req.body;
 
-        if (!video_id) {
-            return res.status(400).json({ success: false, error: 'Video ID is required' });
+        if (!video_uuid) {
+            return res.status(400).json({ success: false, error: 'Video UUID is required' });
         }
 
         // If video is in queue, remove it
-        processingManager.removeFromQueue(video_id);
+        processingManager.removeFromQueue(video_uuid);
 
         // If video is currently processing, we can't delete it from S3 yet
-        if (processingManager.getProcessingVideo() === video_id) {
+        if (processingManager.getProcessingVideo() === video_uuid) {
             return res.status(409).json({
                 success: false,
                 error: 'Video is currently being processed and cannot be deleted',
@@ -519,7 +520,7 @@ app.post('/api/delete', authenticateAPIKey, async (req, res) => {
             });
         }
 
-        const s3FolderPath = `videos/${video_id}`;
+        const s3FolderPath = `videos/${video_uuid}`;
 
         // List all objects in the video folder
         const listParams = {
@@ -551,14 +552,14 @@ app.post('/api/delete', authenticateAPIKey, async (req, res) => {
 });
 
 // Process Video in Background
-async function processVideoInBackground(video_url, video_id, callback_url, videoData) {
-    const tempFilePath = path.join(TEMP_DIR, `video_${video_id}.mp4`);
-    const outputDir = path.join(TEMP_DIR, `hls_${video_id}`);
+async function processVideoInBackground(video_url, video_uuid, callback_url, videoData) {
+    const tempFilePath = path.join(TEMP_DIR, `video_${video_uuid}.mp4`);
+    const outputDir = path.join(TEMP_DIR, `hls_${video_uuid}`);
 
     const updateStatus = async (status, error = null, conversion_url = null, duration = null, original_url = null) => {
         try {
             const payload = {
-                video_id,
+                video_uuid,
                 status,
                 ...(error && { error: error.message }),
                 ...(conversion_url && { conversion_url }),
@@ -582,7 +583,7 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
         await updateStatus('uploading-original', null, null);
         let originalUrl = null;
         try {
-            const s3FolderPath = `videos/${video_id}/original`;
+            const s3FolderPath = `videos/${video_uuid}/original`;
 
             // Extract original filename from url
             let originalFilename = 'original.mp4';
@@ -594,18 +595,15 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
 
                 if (urlFilename && urlFilename.length > 0 && urlFilename !== '/' && urlFilename.includes('.')) {
                     const fileExt = path.extname(urlFilename);
-
                     const filenameWithoutExt = path.basename(urlFilename, fileExt);
-                    
                     const cleanedFilename = filenameWithoutExt.replace(/\s+/g, '-');
-                    originalFilename = `${cleanedFilename}_${video_id}${fileExt}`;
+                    originalFilename = `${cleanedFilename}_${video_uuid}${fileExt}`;
                 } else {
-                    
-                    originalFilename = `video_${video_id}.mp4`;
+                    originalFilename = `video_${video_uuid}.mp4`;
                 }
             } catch (error) {
                 console.log('Could not extract filename from URL, using default name');
-                originalFilename = `video_${video_id}.mp4`;
+                originalFilename = `video_${video_uuid}.mp4`;
             }
 
             const s3Path = `${s3FolderPath}/${originalFilename}`;
@@ -670,7 +668,7 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
 
         await updateStatus('uploading', null, null, videoDuration, originalUrl);
         const s3Url = await Promise.race([
-            uploadToS3(outputDir, video_id, videoData),
+            uploadToS3(outputDir, video_uuid, videoData),
             new Promise((_, reject) => setTimeout(() => reject(new Error('Upload timeout after 60 minutes')), 3600000))
         ]);
 
@@ -678,7 +676,7 @@ async function processVideoInBackground(video_url, video_id, callback_url, video
         await cleanup(tempFilePath, outputDir);
         return s3Url;
     } catch (error) {
-        console.error(`Error processing video ${video_id}:`, error);
+        console.error(`Error processing video ${video_uuid}:`, error);
         const formattedError = { message: error.message || 'Unknown error occurred', code: error.code || 'UNKNOWN_ERROR', stack: error.stack };
         await updateStatus('failed', formattedError);
         await cleanup(tempFilePath, outputDir);
@@ -755,29 +753,29 @@ async function cleanupTempFiles() {
 }
 
 // Mark Video as Failed on Shutdown
-async function markVideoAsFailed(videoId) {
+async function markVideoAsFailed(videoUuid) {
     try {
-        const callbackUrl = processingManager.getCallbackUrl(videoId);
+        const callbackUrl = processingManager.getCallbackUrl(videoUuid);
         if (!callbackUrl) {
-            console.error(`No callback URL found for video ${videoId}`);
+            console.error(`No callback URL found for video ${videoUuid}`);
             return;
         }
-        await sendCallback(callbackUrl, { video_id: videoId, status: 'failed', error: 'Server shutdown during processing' });
-        console.log(`Successfully marked video ${videoId} as failed during shutdown`);
+        await sendCallback(callbackUrl, { video_uuid: videoUuid, status: 'failed', error: 'Server shutdown during processing' });
+        console.log(`Successfully marked video ${videoUuid} as failed during shutdown`);
     } catch (error) {
-        console.error(`Failed to mark video ${videoId} as failed:`, error);
+        console.error(`Failed to mark video ${videoUuid} as failed:`, error);
     }
 }
 
 // Shutdown Server Gracefully
 async function shutdownServer() {
     console.log('Shutting down server...');
-    const currentVideoId = processingManager.getProcessingVideo();
+    const currentVideoUuid = processingManager.getProcessingVideo();
 
-    if (currentVideoId) {
-        console.log(`Found video ${currentVideoId} still processing during shutdown`);
+    if (currentVideoUuid) {
+        console.log(`Found video ${currentVideoUuid} still processing during shutdown`);
         try {
-            await markVideoAsFailed(currentVideoId);
+            await markVideoAsFailed(currentVideoUuid);
         } catch (error) {
             console.error('Error marking video as failed during shutdown:', error);
         }
@@ -785,15 +783,15 @@ async function shutdownServer() {
 
     // Mark all queued videos as failed
     const queueStatus = processingManager.getQueueStatus();
-    for (const videoId of queueStatus.queueItems) {
-        console.log(`Found video ${videoId} in queue during shutdown`);
+    for (const videoUuid of queueStatus.queueItems) {
+        console.log(`Found video ${videoUuid} in queue during shutdown`);
         try {
             const nextVideo = processingManager.getNextFromQueue();
-            if (nextVideo && nextVideo.videoId === videoId) {
-                await markVideoAsFailed(videoId);
+            if (nextVideo && nextVideo.video_uuid === videoUuid) {
+                await markVideoAsFailed(videoUuid);
             }
         } catch (error) {
-            console.error(`Error marking queued video ${videoId} as failed during shutdown:`, error);
+            console.error(`Error marking queued video ${videoUuid} as failed during shutdown:`, error);
         }
     }
 
